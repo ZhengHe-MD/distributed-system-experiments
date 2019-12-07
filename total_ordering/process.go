@@ -10,26 +10,20 @@ import (
 	"time"
 )
 
-var (
-	checkAndConsumeResourceInterval = 1000 * time.Millisecond
-	checkAndReleaseResourceInterval = 1000 * time.Millisecond
-	sendRandomRequestInterval       = 1000 * time.Millisecond
-)
-
-type Message struct {
+type ConsumptionLog struct {
 	Timestamp int
 	ProcessID int
 	ConsumeID int
 }
 
-func (m Message) String() string {
+func (m ConsumptionLog) String() string {
 	return fmt.Sprintf("[%d %d]", m.Timestamp, m.ProcessID)
 }
 
 type Process struct {
 	mu             sync.Mutex
 	id             int
-	requestQueue   []Message
+	requestQueue   []Request
 	acknowledgeMap map[int][]int
 	releaseList    []int
 	environment    *DistributedEnvironment
@@ -38,7 +32,7 @@ type Process struct {
 
 	holdingResource bool
 
-	_order []Message
+	_order []ConsumptionLog
 }
 
 func NewProcess(id int, env *DistributedEnvironment) *Process {
@@ -56,21 +50,19 @@ func NewProcess(id int, env *DistributedEnvironment) *Process {
 }
 
 func (m *Process) Run(ctx context.Context) {
-	go m.sendRandomRequest(ctx)
-	go m.checkAndConsumeResource(ctx)
-	go m.checkAndReleaseResource(ctx)
+	go m.startRandomRequestLoop(ctx)
+	go m.checkAndConsumeResourceLoop(ctx)
+	go m.checkAndReleaseResourceLoop(ctx)
 }
 
-func (m *Process) sendRandomRequest(ctx context.Context) {
+func (m *Process) startRandomRequestLoop(ctx context.Context) {
 	for {
-		//log.Printf("Process %d: inside sendRandomRequest", m.id)
 		m.mu.Lock()
-		//log.Printf("Process %d: inside sendRandomRequest locked", m.id)
 
-		if rand.Float64() < 0.8 {
+		if rand.Float64() < RequestSendingProb {
 			m._tick(ctx, 0)
 			m.currConsumeID += 1
-			msg := Message{
+			clog := ConsumptionLog{
 				Timestamp: m.timestamp,
 				ProcessID: m.id,
 				ConsumeID: m.currConsumeID,
@@ -78,36 +70,39 @@ func (m *Process) sendRandomRequest(ctx context.Context) {
 
 			for pid := range m.environment.Top {
 				if pid == m.id {
-					m.acknowledgeMap[msg.ConsumeID] = append(
-						m.acknowledgeMap[msg.ConsumeID], pid)
+					m.acknowledgeMap[clog.ConsumeID] = append(
+						m.acknowledgeMap[clog.ConsumeID], pid)
 					continue
 				}
 
-				log.Printf("Process %d: send request %v to process %d at %d", m.id, msg, pid, m.timestamp)
+				log.Printf("Process %d: send request %v to process %d at %d", m.id, clog, pid, m.timestamp)
 
-				m._enqueue(ctx, msg)
+				request := Request{
+					Type:      RequestTypeConsume,
+					FromPID:   clog.ProcessID,
+					ConsumeID: clog.ConsumeID,
+					TS:        clog.Timestamp,
+				}
+
+				m._enqueue(ctx, request)
 
 				go func(receiverID int) {
 					m.mu.Lock()
 					m._tick(ctx, 0)
 					m.mu.Unlock()
 
-					res, err := m.environment.SendRequestToProcess(ctx, receiverID, ResourceReq{
-						Timestamp: msg.Timestamp,
-						ProcessID: msg.ProcessID,
-						IsRelease: false,
-						ConsumeID: msg.ConsumeID,
-					})
+					res, err := m.environment.SendRequestToProcess(ctx, receiverID, request)
 
 					m.mu.Lock()
-					if err != nil || !res.Acknowledged {
-						m._tick(ctx, 0)
-						log.Printf("Process %d: err %v res %v at %d", m.id, err, res, m.timestamp)
+
+					if err != nil {
+						// NOTE: code should not reach here
+						log.Panicf("Process %d: err %v res %v at %d", m.id, err, res, m.timestamp)
 					} else {
-						m._tick(ctx, res.Timestamp)
-						log.Printf("Process %d: receive ack from process %d at %d", m.id, res.ProcessID, m.timestamp)
-						m.acknowledgeMap[msg.ConsumeID] = append(
-							m.acknowledgeMap[msg.ConsumeID], res.ProcessID)
+						m._tick(ctx, res.TS)
+						log.Printf("Process %d: receive ack from process %d at %d", m.id, res.FromPID, m.timestamp)
+						m.acknowledgeMap[clog.ConsumeID] = append(
+							m.acknowledgeMap[clog.ConsumeID], res.FromPID)
 					}
 					m.mu.Unlock()
 				}(pid)
@@ -116,29 +111,27 @@ func (m *Process) sendRandomRequest(ctx context.Context) {
 
 		m.mu.Unlock()
 
-		time.Sleep(sendRandomRequestInterval)
+		time.Sleep(SendRandomRequestInterval)
 	}
 }
 
-func (m *Process) checkAndConsumeResource(ctx context.Context) {
+func (m *Process) checkAndConsumeResourceLoop(ctx context.Context) {
 	for {
-		//log.Printf("Process %d: inside checkAndConsumeResource", m.id)
 		m.mu.Lock()
-		//log.Printf("Process %d: inside checkAndConsumeResource locked", m.id)
 
 		if len(m.requestQueue) > 0 && (!m.holdingResource) {
 			req := m.requestQueue[0]
 
-			if req.ProcessID == m.id && m.environment.HasReceiveAllResponse(m.acknowledgeMap[req.ConsumeID]) && m.environment.Resource.TryLock() {
+			if req.FromPID == m.id && m.environment.HasReceiveAllResponse(m.acknowledgeMap[req.ConsumeID]) && m.environment.Resource.TryLock() {
 				m._tick(ctx, 0)
 				log.Printf("Process %d: consume resource at %d", m.id, m.timestamp)
 				//m._printInternalState()
 				// new event: consume resource
 				m.holdingResource = true
 
-				m._order = append(m._order, Message{
-					Timestamp: req.Timestamp,
-					ProcessID: req.ProcessID,
+				m._order = append(m._order, ConsumptionLog{
+					Timestamp: req.TS,
+					ProcessID: req.FromPID,
 					ConsumeID: req.ConsumeID,
 				})
 
@@ -149,30 +142,29 @@ func (m *Process) checkAndConsumeResource(ctx context.Context) {
 					}
 
 					go func(receiverID int) {
-						var timestamp int
-						var pid int
+						var request Request
 						m.mu.Lock()
+						// event: send release request
 						m._tick(ctx, 0)
 						log.Printf("Process %d: send release request to process %d at %d",
 							m.id, receiverID, m.timestamp)
-						timestamp = m.timestamp
-						pid = m.id
+						request = Request{
+							Type:      RequestTypeRelease,
+							FromPID:   m.id,
+							ConsumeID: req.ConsumeID,
+							TS:        m.timestamp,
+						}
 						m.mu.Unlock()
 
-						res, err := m.environment.SendRequestToProcess(ctx, receiverID, ResourceReq{
-							Timestamp: timestamp,
-							ProcessID: pid,
-							IsRelease: true,
-							ConsumeID: req.ConsumeID,
-						})
+						res, err := m.environment.SendRequestToProcess(ctx, receiverID, request)
 
 						m.mu.Lock()
-						// new event: receive response
-						if err != nil || !res.Released || (res.ToConsumeID != req.ConsumeID) {
-							m._tick(ctx, 0)
-							log.Printf("Process %d: err %v at %d", m.id, err, m.timestamp)
+						// sanity check
+						if err != nil || res.ConsumeID != req.ConsumeID {
+							// NOTE: should not reach here
+							log.Panicf("Process %d: err %v at %d", m.id, err, m.timestamp)
 						} else {
-							m._tick(ctx, res.Timestamp)
+							m._tick(ctx, res.TS)
 							m.releaseList = append(m.releaseList, receiverID)
 						}
 						m.mu.Unlock()
@@ -182,32 +174,30 @@ func (m *Process) checkAndConsumeResource(ctx context.Context) {
 		}
 		m.mu.Unlock()
 
-		time.Sleep(checkAndConsumeResourceInterval)
+		time.Sleep(CheckAndConsumeResourceInterval)
 	}
 }
 
-func (m *Process) checkAndReleaseResource(ctx context.Context) {
+func (m *Process) checkAndReleaseResourceLoop(ctx context.Context) {
 	for {
-		//log.Printf("Process %d: inside checkAndReleaseResource", m.id)
-
 		m.mu.Lock()
 
 		if len(m.requestQueue) > 0 && m.holdingResource {
-			var req Message
+			var req Request
 			var idx int
 			for i, request := range m.requestQueue {
-				if request.ProcessID == m.id {
+				if request.FromPID == m.id {
 					req = request
 					idx = i
 					break
 				}
 			}
 
-			if req.ProcessID == m.id && m.environment.HasReceiveAllResponse(m.releaseList) {
+			if req.FromPID == m.id && m.environment.HasReceiveAllResponse(m.releaseList) {
 				// new event: release resource
 				m._tick(ctx, 0)
 				m.releaseList = nil
-				delete(m.acknowledgeMap, req.Timestamp)
+				delete(m.acknowledgeMap, req.TS)
 				m.requestQueue = append(m.requestQueue[:idx], m.requestQueue[idx+1:]...)
 				m.holdingResource = false
 				log.Printf("Process %d: release resource at %d", m.id, m.timestamp)
@@ -217,58 +207,72 @@ func (m *Process) checkAndReleaseResource(ctx context.Context) {
 
 		m.mu.Unlock()
 
-		time.Sleep(checkAndReleaseResourceInterval)
+		time.Sleep(CheckAndReleaseResourceInterval)
 	}
 }
 
-func (m *Process) HandleRequest(ctx context.Context, req ResourceReq) ResourceRes {
+func (m *Process) HandleRequest(ctx context.Context, req Request) Response {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// new request means new event
-	m._tick(ctx, req.Timestamp)
+	// event: new request
+	m._tick(ctx, req.TS)
 
-	if req.IsRelease {
-		for i, request := range m.requestQueue {
-			// NOTE: find the earliest resource request from req.ProcessID
-			if request.ProcessID == req.ProcessID {
-
-				if request.ConsumeID != req.ConsumeID {
-					log.Panicf("Process %d: invalid data", m.id)
-				}
-
-				m.requestQueue = append(m.requestQueue[:i], m.requestQueue[i+1:]...)
-				m._order = append(m._order, Message{
-					Timestamp: request.Timestamp,
-					ProcessID: request.ProcessID,
-					ConsumeID: request.ConsumeID,
-				})
-				log.Printf("Process %d: ack release %v at %d", m.id, req, m.timestamp)
-				return ResourceRes{
-					ProcessID:   m.id,
-					Timestamp:   m.timestamp,
-					Released:    true,
-					ToConsumeID: req.ConsumeID,
-				}
-			}
-		}
-		log.Panicf("Process %d: err req %v not found in requestQueue at %v", m.id, req, m.timestamp)
+	switch req.Type {
+	case RequestTypeConsume:
+		return m._handleConsumeRequest(ctx, req)
+	case RequestTypeRelease:
+		return m._handleReleaseRequest(ctx, req)
+	default:
+		return m._handle404(ctx, req)
 	}
+}
 
-	m._enqueue(ctx, Message{
-		Timestamp: req.Timestamp,
-		ProcessID: req.ProcessID,
-		ConsumeID: req.ConsumeID,
-	})
+func (m *Process) _handleConsumeRequest(ctx context.Context, req Request) Response {
+	m._enqueue(ctx, req)
 
 	log.Printf("Process %d: ack request %v at %d", m.id, req, m.timestamp)
-
-	return ResourceRes{
-		Timestamp:    m.timestamp,
-		ProcessID:    m.id,
-		Acknowledged: true,
-		ToConsumeID:  req.ConsumeID,
+	return Response{
+		Type:      ResponseTypeAckConsume,
+		FromPID:   m.id,
+		ConsumeID: req.ConsumeID,
+		TS:        m.timestamp,
 	}
+}
+
+func (m *Process) _handleReleaseRequest(ctx context.Context, req Request) Response {
+	for i, request := range m.requestQueue {
+		// NOTE: find the earliest resource request from req.ProcessID
+		if request.FromPID == req.FromPID {
+			if request.ConsumeID != req.ConsumeID {
+				log.Panicf("Process %d: invalid data", m.id)
+			}
+
+			m.requestQueue = append(m.requestQueue[:i], m.requestQueue[i+1:]...)
+			m._order = append(m._order, ConsumptionLog{
+				Timestamp: request.TS,
+				ProcessID: request.FromPID,
+				ConsumeID: request.ConsumeID,
+			})
+
+			log.Printf("Process %d: ack release %v at %d", m.id, req, m.timestamp)
+			return Response{
+				FromPID:   m.id,
+				TS:        m.timestamp,
+				Type:      ResponseTypeAckRelease,
+				ConsumeID: req.ConsumeID,
+			}
+		}
+	}
+	log.Panicf("Process %d: err req %v not found in requestQueue at %v", m.id, req, m.timestamp)
+	// NOTE: unreachable, make ide happy
+	return Response{}
+}
+
+func (m *Process) _handle404(ctx context.Context, req Request) Response {
+	log.Panicf("Process %d: err unkown request type %v", m.id, req.Type)
+	// NOTE: unreachable, make ide happy
+	return Response{}
 }
 
 // NOTE: thread-unsafe
@@ -282,16 +286,13 @@ func (m *Process) _tick(ctx context.Context, externalTimestamp int) {
 	return
 }
 
-func (m *Process) _enqueue(ctx context.Context, msg Message) {
-	m.requestQueue = append(m.requestQueue, msg)
+func (m *Process) _enqueue(ctx context.Context, req Request) {
+	m.requestQueue = append(m.requestQueue, req)
 	sort.SliceStable(m.requestQueue, func(i, j int) bool {
-		if m.requestQueue[i].Timestamp < m.requestQueue[j].Timestamp {
-			return true
-		} else if m.requestQueue[i].Timestamp > m.requestQueue[j].Timestamp {
-			return false
-		} else {
-			return m.requestQueue[i].ProcessID < m.requestQueue[j].ProcessID
+		if m.requestQueue[i].TS != m.requestQueue[j].TS {
+			return m.requestQueue[i].TS < m.requestQueue[j].TS
 		}
+		return m.requestQueue[i].FromPID < m.requestQueue[j].FromPID
 	})
 }
 
