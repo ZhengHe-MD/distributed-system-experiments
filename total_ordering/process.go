@@ -54,28 +54,22 @@ func (m *Process) startRandomRequestLoop(ctx context.Context) {
 		if rand.Float64() < RequestSendingProb {
 			m._tick(ctx, 0)
 			m.currConsumeID += 1
-			clog := ConsumptionLog{
-				TS:        m.ts,
-				PID:       m.id,
+
+			request := Request{
+				Type:      RequestTypeConsume,
+				FromPID:   m.id,
 				ConsumeID: m.currConsumeID,
+				TS:        m.ts,
 			}
 
 			for pid := range m.environment.Top {
 				if pid == m.id {
-					m.succAckInfo[clog.ConsumeID] = append(
-						m.succAckInfo[clog.ConsumeID], pid)
+					m.succAckInfo[request.ConsumeID] = append(
+						m.succAckInfo[request.ConsumeID], pid)
 					continue
 				}
 
-				log.Printf("Process %d: send request %v to process %d at %d", m.id, clog, pid, m.ts)
-
-				request := Request{
-					Type:      RequestTypeConsume,
-					FromPID:   clog.PID,
-					ConsumeID: clog.ConsumeID,
-					TS:        clog.TS,
-				}
-
+				m.__printf("send request %v to P[%d]", request, pid)
 				m._enqueue(ctx, request)
 
 				go func(receiverID int) {
@@ -90,12 +84,12 @@ func (m *Process) startRandomRequestLoop(ctx context.Context) {
 					m.mu.Lock()
 					if err != nil {
 						// NOTE: code should not reach here
-						log.Panicf("Process %d: err %v res %v at %d", m.id, err, res, m.ts)
+						m.__panicf("err %v res %v", err, res)
 					} else {
 						m._tick(ctx, res.TS)
-						log.Printf("Process %d: receive ack from process %d at %d", m.id, res.FromPID, m.ts)
-						m.succAckInfo[clog.ConsumeID] = append(
-							m.succAckInfo[clog.ConsumeID], res.FromPID)
+						m.__printf("receive ack %v", res)
+						m.succAckInfo[request.ConsumeID] = append(
+							m.succAckInfo[request.ConsumeID], res.FromPID)
 					}
 					m.mu.Unlock()
 				}(pid)
@@ -117,7 +111,7 @@ func (m *Process) checkAndConsumeResourceLoop(ctx context.Context) {
 
 			if req.FromPID == m.id && m.environment.HasReceiveAllResponse(m.succAckInfo[req.ConsumeID]) && m.environment.Resource.TryLock() {
 				m._tick(ctx, 0)
-				log.Printf("Process %d: consume resource at %d", m.id, m.ts)
+				m.__printf("consume resource")
 				// new event: consume resource
 
 				m.logs = append(m.logs, ConsumptionLog{
@@ -137,14 +131,13 @@ func (m *Process) checkAndConsumeResourceLoop(ctx context.Context) {
 						m.mu.Lock()
 						// event: send release request
 						m._tick(ctx, 0)
-						log.Printf("Process %d: send release request to process %d at %d",
-							m.id, receiverID, m.ts)
 						request = Request{
 							Type:      RequestTypeRelease,
 							FromPID:   m.id,
 							ConsumeID: req.ConsumeID,
 							TS:        m.ts,
 						}
+						m.__printf("send release request %v to P[%d]", request, receiverID)
 						m.mu.Unlock()
 
 						res, err := m.environment.SendRequestToProcess(ctx, receiverID, request)
@@ -153,7 +146,7 @@ func (m *Process) checkAndConsumeResourceLoop(ctx context.Context) {
 						// sanity check
 						if err != nil || res.ConsumeID != req.ConsumeID {
 							// NOTE: should not reach here
-							log.Panicf("Process %d: err %v at %d", m.id, err, m.ts)
+							m.__panicf("err %v res %v", err, res)
 						} else {
 							m._tick(ctx, res.TS)
 							m.succReleaseInfo = append(m.succReleaseInfo, receiverID)
@@ -190,7 +183,7 @@ func (m *Process) checkAndReleaseResourceLoop(ctx context.Context) {
 				m.succReleaseInfo = nil
 				delete(m.succAckInfo, req.TS)
 				m.requestQueue = append(m.requestQueue[:idx], m.requestQueue[idx+1:]...)
-				log.Printf("Process %d: release resource at %d", m.id, m.ts)
+				m.__printf("release resource")
 				m.environment.Resource.Unlock()
 			}
 		}
@@ -220,8 +213,7 @@ func (m *Process) HandleRequest(ctx context.Context, req Request) Response {
 
 func (m *Process) _handleConsumeRequest(ctx context.Context, req Request) Response {
 	m._enqueue(ctx, req)
-
-	log.Printf("Process %d: ack request %v at %d", m.id, req, m.ts)
+	m.__printf("ack request %v", req)
 	return Response{
 		Type:      ResponseTypeAckConsume,
 		FromPID:   m.id,
@@ -235,7 +227,7 @@ func (m *Process) _handleReleaseRequest(ctx context.Context, req Request) Respon
 		// NOTE: find the earliest resource request from req.PID
 		if request.FromPID == req.FromPID {
 			if request.ConsumeID != req.ConsumeID {
-				log.Panicf("Process %d: invalid data", m.id)
+				m.__panicf("invalid data")
 			}
 
 			m.requestQueue = append(m.requestQueue[:i], m.requestQueue[i+1:]...)
@@ -245,7 +237,7 @@ func (m *Process) _handleReleaseRequest(ctx context.Context, req Request) Respon
 				ConsumeID: request.ConsumeID,
 			})
 
-			log.Printf("Process %d: ack release %v at %d", m.id, req, m.ts)
+			m.__printf("ack release %v", req)
 			return Response{
 				FromPID:   m.id,
 				TS:        m.ts,
@@ -260,7 +252,7 @@ func (m *Process) _handleReleaseRequest(ctx context.Context, req Request) Respon
 }
 
 func (m *Process) _handle404(ctx context.Context, req Request) Response {
-	log.Panicf("Process %d: err unkown request type %v", m.id, req.Type)
+	m.__panicf("err unknown request type %v", req.Type)
 	// NOTE: unreachable, make ide happy
 	return Response{}
 }
@@ -286,13 +278,22 @@ func (m *Process) _enqueue(ctx context.Context, req Request) {
 	})
 }
 
-func (m *Process) _printInternalState() {
-	log.Printf("Process %d: requestQueue %v", m.id, m.requestQueue)
-	log.Printf("Process %d: logs %v", m.id, m.logs)
+func (m *Process) __printf(format string, args ...interface{}) {
+	log.Printf(m.__prefixLogFormat(format), args...)
 }
 
+func (m *Process) __panicf(format string, args ...interface{}) {
+	log.Panicf(m.__prefixLogFormat(format), args...)
+}
+
+func (m *Process) __prefixLogFormat(format string) string {
+	return fmt.Sprintf("P[%d] T[%d] %s", m.id, m.ts, format)
+}
+
+// NOTE: for debugging purpose
 func (m *Process) __printInternalState() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m._printInternalState()
+	m.__printf("requestQueue %v", m.requestQueue)
+	m.__printf("logs %v", m.logs)
 }
