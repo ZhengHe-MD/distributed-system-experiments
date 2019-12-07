@@ -11,13 +11,13 @@ import (
 )
 
 type ConsumptionLog struct {
-	Timestamp int
-	ProcessID int
+	TS        int
+	PID       int
 	ConsumeID int
 }
 
 func (m ConsumptionLog) String() string {
-	return fmt.Sprintf("[%d %d]", m.Timestamp, m.ProcessID)
+	return fmt.Sprintf("[%d %d]", m.ConsumeID, m.PID)
 }
 
 type Process struct {
@@ -30,22 +30,19 @@ type Process struct {
 	timestamp      int
 	currConsumeID  int
 
-	holdingResource bool
-
 	_order []ConsumptionLog
 }
 
 func NewProcess(id int, env *DistributedEnvironment) *Process {
 	rand.Seed(time.Now().Unix())
 	return &Process{
-		id:              id,
-		requestQueue:    nil,
-		acknowledgeMap:  make(map[int][]int),
-		releaseList:     nil,
-		environment:     env,
-		timestamp:       0,
-		currConsumeID:   0,
-		holdingResource: false,
+		id:             id,
+		requestQueue:   nil,
+		acknowledgeMap: make(map[int][]int),
+		releaseList:    nil,
+		environment:    env,
+		timestamp:      0,
+		currConsumeID:  0,
 	}
 }
 
@@ -63,8 +60,8 @@ func (m *Process) startRandomRequestLoop(ctx context.Context) {
 			m._tick(ctx, 0)
 			m.currConsumeID += 1
 			clog := ConsumptionLog{
-				Timestamp: m.timestamp,
-				ProcessID: m.id,
+				TS:        m.timestamp,
+				PID:       m.id,
 				ConsumeID: m.currConsumeID,
 			}
 
@@ -79,9 +76,9 @@ func (m *Process) startRandomRequestLoop(ctx context.Context) {
 
 				request := Request{
 					Type:      RequestTypeConsume,
-					FromPID:   clog.ProcessID,
+					FromPID:   clog.PID,
 					ConsumeID: clog.ConsumeID,
-					TS:        clog.Timestamp,
+					TS:        clog.TS,
 				}
 
 				m._enqueue(ctx, request)
@@ -89,12 +86,13 @@ func (m *Process) startRandomRequestLoop(ctx context.Context) {
 				go func(receiverID int) {
 					m.mu.Lock()
 					m._tick(ctx, 0)
+					requestCopy := request.Copy()
+					requestCopy.TS = m.timestamp
 					m.mu.Unlock()
 
-					res, err := m.environment.SendRequestToProcess(ctx, receiverID, request)
+					res, err := m.environment.SendRequestToProcess(ctx, receiverID, requestCopy)
 
 					m.mu.Lock()
-
 					if err != nil {
 						// NOTE: code should not reach here
 						log.Panicf("Process %d: err %v res %v at %d", m.id, err, res, m.timestamp)
@@ -119,19 +117,17 @@ func (m *Process) checkAndConsumeResourceLoop(ctx context.Context) {
 	for {
 		m.mu.Lock()
 
-		if len(m.requestQueue) > 0 && (!m.holdingResource) {
+		if len(m.requestQueue) > 0 {
 			req := m.requestQueue[0]
 
 			if req.FromPID == m.id && m.environment.HasReceiveAllResponse(m.acknowledgeMap[req.ConsumeID]) && m.environment.Resource.TryLock() {
 				m._tick(ctx, 0)
 				log.Printf("Process %d: consume resource at %d", m.id, m.timestamp)
-				//m._printInternalState()
 				// new event: consume resource
-				m.holdingResource = true
 
 				m._order = append(m._order, ConsumptionLog{
-					Timestamp: req.TS,
-					ProcessID: req.FromPID,
+					TS:        req.TS,
+					PID:       req.FromPID,
 					ConsumeID: req.ConsumeID,
 				})
 
@@ -182,7 +178,7 @@ func (m *Process) checkAndReleaseResourceLoop(ctx context.Context) {
 	for {
 		m.mu.Lock()
 
-		if len(m.requestQueue) > 0 && m.holdingResource {
+		if len(m.requestQueue) > 0 {
 			var req Request
 			var idx int
 			for i, request := range m.requestQueue {
@@ -199,7 +195,6 @@ func (m *Process) checkAndReleaseResourceLoop(ctx context.Context) {
 				m.releaseList = nil
 				delete(m.acknowledgeMap, req.TS)
 				m.requestQueue = append(m.requestQueue[:idx], m.requestQueue[idx+1:]...)
-				m.holdingResource = false
 				log.Printf("Process %d: release resource at %d", m.id, m.timestamp)
 				m.environment.Resource.Unlock()
 			}
@@ -242,7 +237,7 @@ func (m *Process) _handleConsumeRequest(ctx context.Context, req Request) Respon
 
 func (m *Process) _handleReleaseRequest(ctx context.Context, req Request) Response {
 	for i, request := range m.requestQueue {
-		// NOTE: find the earliest resource request from req.ProcessID
+		// NOTE: find the earliest resource request from req.PID
 		if request.FromPID == req.FromPID {
 			if request.ConsumeID != req.ConsumeID {
 				log.Panicf("Process %d: invalid data", m.id)
@@ -250,8 +245,8 @@ func (m *Process) _handleReleaseRequest(ctx context.Context, req Request) Respon
 
 			m.requestQueue = append(m.requestQueue[:i], m.requestQueue[i+1:]...)
 			m._order = append(m._order, ConsumptionLog{
-				Timestamp: request.TS,
-				ProcessID: request.FromPID,
+				TS:        request.TS,
+				PID:       request.FromPID,
 				ConsumeID: request.ConsumeID,
 			})
 

@@ -62,7 +62,7 @@ func main() {
 		p.Run(ctx)
 	}
 
-	time.Sleep(5 * time.Second)
+	time.Sleep(10 * time.Second)
 
 	for !disEnv.Resource.TryLock() {
 		time.Sleep(10 * time.Millisecond)

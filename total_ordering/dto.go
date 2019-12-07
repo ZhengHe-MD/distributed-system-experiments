@@ -46,8 +46,8 @@ type Request struct {
 }
 
 func (m Request) String() string {
-	return fmt.Sprintf("[%v %d %d %d]",
-		m.Type, m.FromPID, m.ConsumeID, m.TS)
+	return fmt.Sprintf("[%d %d %d]",
+		m.FromPID, m.ConsumeID, m.TS)
 }
 
 func (m Request) Copy() (copy Request) {
@@ -63,6 +63,6 @@ type Response struct {
 }
 
 func (m Response) String() string {
-	return fmt.Sprintf("[%v %d %d %d]",
-		m.Type, m.FromPID, m.ConsumeID, m.TS)
+	return fmt.Sprintf("[%d %d %d]",
+		m.FromPID, m.ConsumeID, m.TS)
 }

@@ -9,4 +9,3 @@ var (
 
 	RequestSendingProb = 0.8
 )
-
