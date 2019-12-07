@@ -25,7 +25,7 @@ func (m *DistributedEnvironment) SendRequestToProcess(ctx context.Context, pid i
 	return
 }
 
-func (m *DistributedEnvironment) HasReceiveAllResponse(records []int) bool {
+func (m *DistributedEnvironment) IsAbleToUpdateResource(records []int) bool {
 	if len(records) != len(m.Top) {
 		return false
 	}
@@ -43,7 +43,7 @@ func (m *DistributedEnvironment) AddProcess(p *Process) {
 }
 
 func main() {
-	processNum := 2
+	processNum := 5
 
 	disEnv := &DistributedEnvironment{
 		Top:      make(map[int]*Process),
@@ -62,7 +62,7 @@ func main() {
 		p.Run(ctx)
 	}
 
-	time.Sleep(10 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	for !disEnv.Resource.TryLock() {
 		time.Sleep(10 * time.Millisecond)
