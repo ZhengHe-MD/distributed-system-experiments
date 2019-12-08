@@ -21,14 +21,13 @@ func (m ConsumptionLog) String() string {
 
 type Process struct {
 	mu           sync.Mutex
-	id           int
-	ts           int
-	pts          map[int]int
-	requestQueue []Request
-	logs         []ConsumptionLog
+	id           int 						// processID
+	ts           int						// logical lock
+	holding      bool						// signals whether this process is holding resource
+	pts          map[int]int				// keep the largest timestamp received from other processes
+	requestQueue []Request					// resource requests queue, sorted by the total order defined in paper
+	logs         []ConsumptionLog 			// resource consuming logs, used to check this algorithm
 	environment  *DistributedEnvironment
-
-	holdingResource bool
 }
 
 func NewProcess(id int, env *DistributedEnvironment) *Process {
@@ -108,9 +107,9 @@ func (m *Process) checkAndConsumeResourceLoop(ctx context.Context) {
 		}
 
 		req := m.requestQueue[0]
-		if req.FromPID == m.id && m._isAbleToUpdateResource(ctx, req.TS) && !m.holdingResource && m.environment.Resource.TryLock() {
+		if req.FromPID == m.id && m._isAbleToUpdateResource(ctx, req.TS) && !m.holding && m.environment.Resource.TryLock() {
 			m.__printf("consume resource")
-			m.holdingResource = true
+			m.holding = true
 
 			m.logs = append(m.logs, ConsumptionLog{
 				TS:  req.TS,
@@ -157,7 +156,7 @@ func (m *Process) checkAndReleaseResourceLoop(ctx context.Context) {
 	for {
 		m.mu.Lock()
 
-		if len(m.requestQueue) > 0 && m.holdingResource {
+		if len(m.requestQueue) > 0 && m.holding {
 			var req Request
 			var idx int
 			for i, request := range m.requestQueue {
@@ -171,7 +170,7 @@ func (m *Process) checkAndReleaseResourceLoop(ctx context.Context) {
 			if req.FromPID == m.id && m._isAbleToUpdateResource(ctx, req.TS) {
 				m.requestQueue = append(m.requestQueue[:idx], m.requestQueue[idx+1:]...)
 				m.__printf("release resource")
-				m.holdingResource = false
+				m.holding = false
 				m.environment.Resource.Unlock()
 			}
 		}
