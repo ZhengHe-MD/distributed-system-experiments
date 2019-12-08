@@ -21,12 +21,12 @@ func (m ConsumptionLog) String() string {
 
 type Process struct {
 	mu           sync.Mutex
-	id           int 						// processID
-	ts           int						// logical lock
-	holding      bool						// signals whether this process is holding resource
-	pts          map[int]int				// keep the largest timestamp received from other processes
-	requestQueue []Request					// resource requests queue, sorted by the total order defined in paper
-	logs         []ConsumptionLog 			// resource consuming logs, used to check this algorithm
+	id           int              // processID
+	ts           int              // logical lock
+	holding      bool             // signals whether this process is holding resource
+	pts          map[int]int      // keep the largest timestamp received from other processes
+	requestQueue []Request        // resource requests queue, sorted by the total order defined in paper
+	logs         []ConsumptionLog // resource consuming logs, used to check this algorithm
 	environment  *DistributedEnvironment
 }
 
