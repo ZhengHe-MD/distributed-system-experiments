@@ -25,25 +25,14 @@ func (m *DistributedEnvironment) SendRequestToProcess(ctx context.Context, pid i
 	return
 }
 
-func (m *DistributedEnvironment) IsAbleToUpdateResource(records []int) bool {
-	if len(records) != len(m.Top) {
-		return false
-	}
-
-	for _, record := range records {
-		if _, ok := m.Top[record]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
 func (m *DistributedEnvironment) AddProcess(p *Process) {
 	m.Top[p.id] = p
 }
 
 func main() {
 	processNum := 5
+
+	// pid: 1, 2, 3, ..., processNum
 
 	disEnv := &DistributedEnvironment{
 		Top:      make(map[int]*Process),
@@ -62,7 +51,7 @@ func main() {
 		p.Run(ctx)
 	}
 
-	time.Sleep(5 * time.Second)
+	time.Sleep(10 * time.Second)
 
 	for !disEnv.Resource.TryLock() {
 		time.Sleep(10 * time.Millisecond)

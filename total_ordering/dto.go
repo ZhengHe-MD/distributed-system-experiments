@@ -39,15 +39,14 @@ func (m ResponseType) String() string {
 }
 
 type Request struct {
-	Type      RequestType
-	FromPID   int
-	ConsumeID int
-	TS        int
+	Type    RequestType
+	FromPID int
+	TS      int
 }
 
 func (m Request) String() string {
-	return fmt.Sprintf("[%d %d %d]",
-		m.FromPID, m.ConsumeID, m.TS)
+	return fmt.Sprintf("[%d %d]",
+		m.FromPID, m.TS)
 }
 
 func (m Request) Copy() (copy Request) {
@@ -56,13 +55,12 @@ func (m Request) Copy() (copy Request) {
 }
 
 type Response struct {
-	Type      ResponseType
-	FromPID   int
-	ConsumeID int
-	TS        int
+	Type    ResponseType
+	FromPID int
+	TS      int
 }
 
 func (m Response) String() string {
-	return fmt.Sprintf("[%d %d %d]",
-		m.FromPID, m.ConsumeID, m.TS)
+	return fmt.Sprintf("[%d %d]",
+		m.FromPID, m.TS)
 }
